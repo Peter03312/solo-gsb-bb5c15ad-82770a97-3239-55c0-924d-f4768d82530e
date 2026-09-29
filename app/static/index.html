@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>情景注入台 · 桌面事故演练</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>情景注入台</h1>
+    <span id="conn" class="conn conn-down">未连接</span>
+  </header>
+
+  <!-- 入口：创建 / 加入 -->
+  <main id="view-landing" class="landing">
+    <section class="panel">
+      <h2>主持演练</h2>
+      <p class="hint">创建演练房间，编排注入卡片并控制虚拟时钟。</p>
+      <input id="create-name" type="text" placeholder="演练名称，如：核心库故障桌面演练" maxlength="120">
+      <button id="btn-create" class="primary">创建演练</button>
+    </section>
+    <section class="panel">
+      <h2>参与演练</h2>
+      <p class="hint">输入主持人分享的 6 位组加入码，实时接收本组的情景注入。</p>
+      <input id="join-code" type="text" placeholder="组加入码" maxlength="6" autocomplete="off">
+      <button id="btn-join" class="primary">加入演练</button>
+      <p id="landing-error" class="error"></p>
+    </section>
+  </main>
+
+  <!-- 房间视图 -->
+  <main id="view-room" class="room hidden">
+    <section class="room-head panel">
+      <div>
+        <div class="room-name" id="room-name"></div>
+        <div class="room-code">加入码 <button id="room-code" class="code-chip" title="点击复制"></button></div>
+        <div id="player-group" class="player-group hidden"></div>
+      </div>
+      <div class="clock-box">
+        <div id="clock" class="clock">00:00:00</div>
+        <div id="status" class="status">待机</div>
+      </div>
+    </section>
+    <p id="room-error" class="error"></p>
+
+    <!-- 主持人控制台 -->
+    <section id="host-console" class="panel hidden">
+      <h2>控制台</h2>
+      <div class="controls">
+        <button id="btn-start"  class="primary">开始演练</button>
+        <button id="btn-pause"  class="warn">暂停</button>
+        <button id="btn-resume" class="primary">继续</button>
+        <button id="btn-reset"  class="danger">重置</button>
+      </div>
+      <div class="export-row">
+        <button id="btn-export" class="primary">导出复盘包（ZIP）</button>
+        <span id="export-hint" class="hint"></span>
+      </div>
+      <p class="hint">可在任意时刻（开始前 / 运行中 / 暂停后 / 重置后）导出：按点击瞬间的
+        <strong>事件水位</strong>打包，生成期间新到达的事件不会混入；空演练也能导出。
+        ZIP 内为离线回放页 <code>replay.html</code>（双击即可打开，可拖动虚拟时间还原当时状态），
+        已剔除房间码、组加入码与观察 token。</p>
+
+      <h3>复盘锚点</h3>
+      <p class="hint">任意状态（待机 / 运行 / 暂停）都可记录锚点：服务端在同一状态锁内把锚点绑定到
+        <strong>当前轮次、虚拟毫秒与当时事件水位</strong>，暂停期间虚拟时间冻结。锚点跨重置保留并归属原轮次，
+        仅主持人可见（参与者与观察者不可见），修改与删除实时同步。导出复盘包后，离线回放页可点击锚点
+        精确还原其绑定时刻状态。</p>
+      <form id="anchor-form" class="anchor-form">
+        <input id="anchor-title" type="text" placeholder="锚点标题，如：宣布切流前一刻" maxlength="120" required>
+        <textarea id="anchor-note" rows="2" placeholder="备注（可选）：现场判断、决策依据、待复盘问题…" maxlength="4000"></textarea>
+        <button type="submit" class="primary">记录锚点</button>
+      </form>
+      <p id="anchors-empty" class="hint">暂无锚点</p>
+      <ul id="anchor-list" class="anchor-list"></ul>
+
+      <h3>参与组（<span id="group-count">0</span>/8）</h3>
+      <p class="hint">每组一个加入码；参与者凭码进入后只能看到「全员」卡片与目标为本组的卡片。</p>
+      <ul id="group-list" class="group-list"></ul>
+      <form id="group-form" class="group-form">
+        <input id="group-name" type="text" placeholder="新组名称，如：红队" maxlength="60" required>
+        <button type="submit" class="primary">创建参与组</button>
+      </form>
+
+      <h3>观察席分享</h3>
+      <p class="hint">选择 1～3 个参与组并设置 5～120 分钟有效期，生成限时只读观察链接：观察者只能看到
+        <strong>已揭示</strong>的全员卡片与所选组卡片，看不到房间码、组加入码、未揭示卡片与回执明细，
+        也没有任何操作能力。链接可随时撤销，到期或撤销后观察者立即断线且无法恢复。</p>
+      <form id="share-form">
+        <div id="share-groups" class="share-groups"></div>
+        <div class="share-form-row">
+          <input id="share-minutes" type="number" min="5" max="120" step="1" value="30" required title="有效期（分钟，5～120）">
+          <button type="submit" class="primary">生成观察链接</button>
+        </div>
+      </form>
+      <p id="shares-empty" class="hint">暂无观察分享</p>
+      <ul id="share-list" class="share-list"></ul>
+
+      <h3>发起现场决策投票</h3>
+      <p class="hint">填写问题与 <strong>2～4 个选项</strong>（选项顺序即平票决胜顺序），勾选参与组
+        并设置<strong>截止虚拟秒</strong>（相对本轮开始）。仅勾选组可见并可在截止前投票 / 改投，
+        每组只计一票；到点由服务端在状态锁内一次性结算，结果持久化。重置时未结算投票作废，
+        已结算结果按轮次保留。</p>
+      <form id="poll-form">
+        <input id="poll-question" type="text" placeholder="投票问题，如：是否立即切流到备用库？"
+               required maxlength="200">
+        <div id="poll-options" class="poll-options">
+          <input class="poll-option" type="text" placeholder="选项 1" required maxlength="200">
+          <input class="poll-option" type="text" placeholder="选项 2" required maxlength="200">
+        </div>
+        <div class="poll-form-row">
+          <button type="button" id="poll-add-option" class="group-op">+ 选项</button>
+          <span class="hint">最多 4 个选项</span>
+        </div>
+        <div id="poll-groups" class="share-groups"></div>
+        <div class="share-form-row">
+          <input id="poll-deadline" type="number" min="1" max="86400" step="1"
+                 placeholder="截止虚拟秒" required title="截止虚拟秒（相对本轮开始，暂停冻结）">
+          <button type="submit" class="primary">发起投票</button>
+        </div>
+      </form>
+
+      <h3>应急车辆申请</h3>
+      <p class="hint">为房间创建一个<strong>总量固定（1～20 辆）</strong>的车辆池（每房间一个，创建后
+        不可改，重置演练保留）。各参与组凭加入码提交<strong>一份 1～5 辆</strong>且不超过总量的申请，
+        取消后才能重新申请。服务端按受理顺序处理：<strong>无更早待分配申请且余量足够才立即分配，
+        否则入队</strong>；取消已分配申请释放车辆后<strong>从队首依次补位，队首数量不足时不跳过</strong>。
+        主持人实时看到各组申请、队列与剩余车辆；参与组只看到本组状态与排位；观察席不可见。</p>
+      <form id="vehicle-pool-form">
+        <div class="share-form-row">
+          <input id="vehicle-pool-total" type="number" min="1" max="20" step="1"
+                 placeholder="车辆池总量（1～20 辆）" required
+                 title="车辆池总量（1～20 辆），创建后固定不可修改">
+          <button type="submit" class="primary">创建车辆池</button>
+        </div>
+      </form>
+
+      <h3>现场情报核验</h3>
+      <p class="hint">填写<strong>待核验命题</strong>并勾选<strong>至少两个参与组</strong>。被勾选的
+        参与组凭加入码提交「支持 / 反对 + 简短依据」，同组修改覆盖原报告、也可撤回；服务端只按
+        <strong>不同参与组的最新报告</strong>即时重算状态：两边均有报告为<strong>有争议</strong>，
+        同一立场至少两组且对立为零为<strong>已证实 / 已否定</strong>，其余为<strong>待核验</strong>。
+        你实时看到逐组报告；参与组只见本组报告与汇总状态；观察席不可见。
+        「重置」清空全部报告但保留命题。</p>
+      <form id="intel-form">
+        <input id="intel-statement" type="text" placeholder="待核验命题，如：东区变电站已恢复供电"
+               required maxlength="200">
+        <div id="intel-groups" class="share-groups"></div>
+        <div class="share-form-row">
+          <span class="hint">至少勾选两个参与组</span>
+          <button type="submit" class="primary">创建待核验命题</button>
+        </div>
+      </form>
+
+      <h3>添加注入卡片</h3>
+      <form id="card-form">
+        <div class="form-row">
+          <input id="card-title" type="text" placeholder="卡片标题，如：告警风暴出现" required maxlength="200">
+          <input id="card-trigger" type="number" min="0" max="86400" step="1" placeholder="触发秒数" required title="相对演练开始的秒数">
+        </div>
+        <select id="card-target" title="卡片目标：全员或某个参与组">
+          <option value="">全员</option>
+        </select>
+        <p class="hint">回执门槛（可选）：选择前置卡片后，本卡需等前置卡片的目标参与组全部回执才揭示；
+          可再设虚拟时钟超时秒数（自触发时刻起算），超时仍未集齐则标记为「超时揭示」并继续。</p>
+        <div class="form-row">
+          <select id="card-gate" title="回执门槛：前置卡片集齐回执后才揭示本卡">
+            <option value="">无门槛：到点即揭示</option>
+          </select>
+          <input id="card-gate-timeout" type="number" min="1" max="86400" step="1"
+                 placeholder="超时秒数（可选）" title="虚拟时钟超时秒数：自触发时刻起算，超时仍未集齐回执则标记为超时揭示">
+        </div>
+        <textarea id="card-content" rows="2" placeholder="注入内容 / 情景描述（参与者可见）" maxlength="4000"></textarea>
+        <button type="submit" class="primary">添加卡片</button>
+        <span id="card-form-hint" class="hint"></span>
+      </form>
+    </section>
+
+    <!-- 卡片列表 -->
+    <section class="panel">
+      <h2 id="cards-title">注入卡片</h2>
+      <p id="cards-empty" class="hint">暂无卡片</p>
+      <ul id="card-list" class="card-list"></ul>
+    </section>
+
+    <!-- 现场决策投票（主持人管理；参与者投票/看结果；观察者不可见） -->
+    <section id="polls-panel" class="panel hidden">
+      <h2>现场决策投票</h2>
+      <p class="hint">截止时间走<strong>虚拟时钟</strong>：暂停即冻结，重连与重启后状态恢复。
+        只有指定参与组能在截止前投票或改投，每组只计一票；结算前参与者只见自己的选择，
+        <strong>到期结算后</strong>才能看到结果（最高票获胜，平票按选项顺序决定）。</p>
+      <p id="polls-empty" class="hint">暂无投票</p>
+      <ul id="poll-list" class="poll-list"></ul>
+    </section>
+
+    <!-- 应急车辆申请（主持人看全量；参与组提交/取消并看本组；观察者完全不可见） -->
+    <section id="vehicles-panel" class="panel hidden">
+      <h2>应急车辆申请</h2>
+      <div id="vehicle-host-view" class="hidden">
+        <p id="vehicle-pool-summary" class="hint"></p>
+        <p id="vehicles-empty" class="hint">暂无申请</p>
+        <ul id="vehicle-list" class="vehicle-list"></ul>
+      </div>
+      <div id="vehicle-player-view" class="hidden">
+        <p class="hint">每组可提交<strong>一份</strong>车辆申请（1～5 辆且不超过车辆池总量）；
+          提交后如需调整请<strong>先取消再重新申请</strong>。分配按受理顺序：无更早排队申请且
+          余量足够时立即分配，否则排队等待补位（队首数量不足时不会跳过队首）。</p>
+        <div id="vehicle-my"></div>
+        <form id="vehicle-request-form" class="hidden">
+          <div class="share-form-row">
+            <input id="vehicle-quantity" type="number" min="1" max="5" step="1"
+                   placeholder="申请数量（1～5 辆）" required title="申请数量（1～5 辆且不超过车辆池总量）">
+            <button type="submit" class="primary">提交车辆申请</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- 现场情报核验板（主持人看逐组报告；参与组提交/撤回并看本组与汇总状态；观察者完全不可见） -->
+    <section id="intel-panel" class="panel hidden">
+      <h2>现场情报核验</h2>
+      <p class="hint">状态只按<strong>不同参与组的最新报告</strong>即时重算（同组多次提交只算一份）：
+        两边均有报告为<strong>有争议</strong>；同一立场至少两组且对立为零为<strong>已证实 / 已否定</strong>；
+        其余为<strong>待核验</strong>。「重置」清空全部报告但保留命题。</p>
+      <p id="intel-empty" class="hint">暂无待核验命题</p>
+      <ul id="intel-list" class="intel-list"></ul>
+    </section>
+
+    <!-- 响应时效面板（仅主持人可见；参与者与观察席拿不到分析数据） -->
+    <section id="latency-panel" class="panel hidden">
+      <h2>响应时效</h2>
+      <p class="hint">按演练轮次统计：每张卡片<strong>揭示时刻的目标组</strong>到<strong>首次回执</strong>与
+        <strong>首次答复</strong>的虚拟毫秒差（暂停时长不计入；撤销回执或修改答复不影响首次响应时间；
+        重置后从新一轮重新统计）。未响应记为「未达」，不以墙钟补足时延；
+        两类中位时延只取已响应样本，空样本显示「无数据」。</p>
+      <div class="latency-toolbar">
+        <select id="latency-round" title="选择演练轮次"></select>
+        <button id="latency-refresh" class="group-op" type="button">刷新</button>
+        <span id="latency-meta" class="hint"></span>
+      </div>
+      <p id="latency-empty" class="hint">该轮暂无已揭示的卡片</p>
+      <div id="latency-groups"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

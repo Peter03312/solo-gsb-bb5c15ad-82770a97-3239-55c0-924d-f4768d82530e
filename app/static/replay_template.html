@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>演练复盘 · 离线回放</title>
+<style>
+  :root {
+    --bg:#0f1420; --panel:#1a2233; --panel-2:#222c42; --text:#e6ebf5; --muted:#8b96ad;
+    --accent:#4da3ff; --green:#3ecf8e; --amber:#f5b942; --red:#ef5b6b; --border:#2c3852;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         background:var(--bg); color:var(--text); min-height:100vh; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px;
+            padding:14px 24px; border-bottom:1px solid var(--border); background:var(--panel);
+            flex-wrap:wrap; }
+  .topbar h1 { font-size:18px; margin:0; letter-spacing:2px; }
+  .offline { font-size:12px; color:var(--green); background:rgba(62,207,142,.15);
+             padding:3px 10px; border-radius:999px; }
+  main { max-width:960px; margin:24px auto; padding:0 16px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+           padding:18px 20px; margin-bottom:16px; }
+  .panel h2 { margin:0 0 10px; font-size:16px; }
+  .panel h3 { margin:14px 0 8px; font-size:14px; color:var(--muted); }
+  .hint { color:var(--muted); font-size:13px; margin:4px 0 10px; }
+  .meta-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+               gap:8px 16px; font-size:13px; }
+  .meta-grid div span { color:var(--muted); margin-right:6px; }
+
+  .replay-bar { display:grid; grid-template-columns:auto 1fr auto auto; gap:14px;
+                align-items:center; }
+  .clock-big { font-family:ui-monospace,monospace; font-size:34px; font-weight:700;
+               font-variant-numeric:tabular-nums; color:var(--accent); line-height:1;
+               min-width:150px; text-align:center; }
+  .clock-sub { text-align:center; font-size:12px; color:var(--muted); margin-top:4px; }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  select, button { background:var(--panel-2); border:1px solid var(--border); border-radius:6px;
+                   color:var(--text); padding:8px 12px; font-size:13px; cursor:pointer; }
+  button { font-weight:600; }
+  button.primary { background:var(--accent); color:#0b1020; border-color:var(--accent); }
+  .ticks { display:flex; justify-content:space-between; font-size:11px; color:var(--muted);
+           margin-top:2px; font-family:ui-monospace,monospace; }
+
+  .card-list { list-style:none; margin:0; padding:0; }
+  .card-item { background:var(--panel-2); border:1px solid var(--border);
+               border-left:4px solid var(--muted); border-radius:8px; padding:12px 14px;
+               margin-bottom:10px; }
+  .card-item.revealed { border-left-color:var(--green); }
+  .card-item.pending  { opacity:.7; }
+  .card-meta { display:flex; justify-content:space-between; align-items:center; gap:8px;
+               font-size:12px; color:var(--muted); margin-bottom:4px; flex-wrap:wrap; }
+  .card-trigger { font-family:ui-monospace,monospace; color:var(--accent); }
+  .badge { padding:2px 8px; border-radius:999px; font-size:11px; white-space:nowrap; }
+  .badge-revealed { background:rgba(62,207,142,.15); color:var(--green); }
+  .badge-pending  { background:rgba(139,150,173,.15); color:var(--muted); }
+  .badge-all    { background:rgba(77,163,255,.15); color:var(--accent); }
+  .badge-target { background:rgba(245,185,66,.15); color:var(--amber); }
+  .card-title { font-weight:700; margin-bottom:4px; }
+  .card-content { font-size:14px; white-space:pre-wrap; }
+  .sub { margin-top:8px; padding-top:8px; border-top:1px dashed var(--border); font-size:12px;
+         display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .chip { padding:2px 8px; border-radius:999px; font-size:11px; }
+  .chip-ok   { background:rgba(62,207,142,.15); color:var(--green); }
+  .chip-wait { background:rgba(139,150,173,.15); color:var(--muted); }
+  .chip-lock { background:rgba(245,185,66,.15); color:var(--amber); }
+  .gate-waiting  { color:var(--amber); }
+  .gate-unlocked { color:var(--green); }
+  .gate-timeout  { color:var(--red); }
+  details.ans { margin-top:6px; background:var(--panel); border:1px solid var(--border);
+                border-radius:6px; padding:6px 10px; font-size:12px; width:100%; }
+  details.ans summary { cursor:pointer; color:var(--accent); }
+  .ans-body { white-space:pre-wrap; margin:6px 0 2px; color:var(--text); }
+  .ans-meta { color:var(--muted); font-size:11px; }
+
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border);
+           vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  td.mono, .mono { font-family:ui-monospace,monospace; }
+  tr.at-t { background:rgba(77,163,255,.08); }
+  .tag { display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px;
+         background:rgba(77,163,255,.15); color:var(--accent); white-space:nowrap; }
+  .tag.clock,.tag.reset { background:rgba(245,185,66,.15); color:var(--amber); }
+  .tag.reveal { background:rgba(62,207,142,.15); color:var(--green); }
+  .tag.recv { background:rgba(139,150,173,.15); color:var(--muted); }
+  .empty { color:var(--muted); font-size:13px; }
+  .two-col { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+  /* 复盘锚点 */
+  .anchor-groups { display:flex; flex-direction:column; gap:10px; }
+  .anchor-round-head { font-size:12px; color:var(--muted); margin:2px 0; }
+  .anchor-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }
+  .anchor-item { background:var(--panel-2); border:1px solid var(--border); border-left:4px solid var(--accent);
+                 border-radius:8px; padding:8px 12px; cursor:pointer; text-align:left; width:100%;
+                 color:var(--text); font-weight:400; }
+  .anchor-item:hover { border-color:var(--accent); background:#26314b; }
+  .anchor-item.active { border-left-color:var(--amber); border-color:var(--amber); }
+  .anchor-item-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .anchor-item-title { font-weight:700; font-size:13px; flex:1; min-width:0;
+                       overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .anchor-item-time { font-family:ui-monospace,monospace; font-size:11px; color:var(--accent); white-space:nowrap; }
+  .anchor-item-note { color:var(--muted); font-size:12px; margin-top:4px; white-space:pre-wrap; }
+  .anchor-item-meta { color:var(--muted); font-size:10px; margin-top:3px; font-family:ui-monospace,monospace; }
+  .cap-banner { display:none; margin-top:10px; padding:7px 12px; border-radius:6px;
+                background:rgba(245,185,66,.12); border:1px solid rgba(245,185,66,.4);
+                color:var(--amber); font-size:12px; align-items:center; gap:10px; flex-wrap:wrap; }
+  .cap-banner.on { display:flex; }
+  .cap-banner button { padding:3px 10px; font-size:12px; font-weight:400; }
+  @media (max-width:760px) { .two-col { grid-template-columns:1fr; }
+    .replay-bar { grid-template-columns:1fr; justify-items:stretch; }
+    .clock-big { min-width:0; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <h1>情景注入台 · 演练复盘</h1>
+  <span class="offline">离线回放页 · 无需联网</span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2 id="room-name">复盘包</h2>
+    <div class="meta-grid" id="meta-grid"></div>
+    <noscript><p class="hint">__REVIEW_DATA_SUMMARY__。启用 JavaScript 后可拖动虚拟时间回放。</p></noscript>
+  </section>
+
+  <section class="panel">
+    <h2>虚拟时间</h2>
+    <p class="hint">选择演练轮次并拖动滑块，还原该轮当时的揭示、回执与答复状态；
+      同一虚拟时刻的事件按事件 ID 稳定排序。「重置」会开启新一轮，编排保留、过程数据清零。</p>
+    <div class="replay-bar">
+      <select id="round-select" title="演练轮次"></select>
+      <div>
+        <input id="time-slider" type="range" min="0" max="1" step="50" value="0">
+        <div class="ticks"><span id="tick-start">T+00:00:00</span><span id="tick-end"></span></div>
+      </div>
+      <div>
+        <div class="clock-big" id="clock">00:00:00</div>
+        <div class="clock-sub" id="clock-sub">待机</div>
+      </div>
+      <div>
+        <button id="btn-play" class="primary">▶ 播放</button>
+        <select id="speed" title="播放速度">
+          <option value="1">1×</option>
+          <option value="4">4×</option>
+          <option value="20">20×</option>
+          <option value="60">60×</option>
+        </select>
+      </div>
+    </div>
+    <div id="cap-banner" class="cap-banner">
+      <span id="cap-text"></span>
+      <button id="btn-clear-cap">返回完整水位视图</button>
+    </div>
+  </section>
+
+  <section class="panel" id="anchor-panel">
+    <h2>复盘锚点</h2>
+    <p class="hint">锚点在演练时由主持人记录，绑定所属轮次、虚拟毫秒与当时事件水位。
+      点击锚点：切换到对应轮次、滑块跳到绑定时间，并<strong>仅重放至锚点水位</strong>——
+      同一虚拟毫秒内 ID 更晚的事件不计入，精确还原锚点时刻状态。拖动滑块或切轮可退出锚点截断。</p>
+    <div id="anchor-groups" class="anchor-groups"></div>
+  </section>
+
+  <section class="panel">
+    <h2>当时状态 · <span id="state-at" class="hint"></span></h2>
+    <p id="cards-empty" class="empty hidden"></p>
+    <ul id="card-list" class="card-list"></ul>
+  </section>
+
+  <div class="two-col">
+    <section class="panel">
+      <h2>时钟动作轨迹</h2>
+      <div id="clock-actions"></div>
+    </section>
+    <section class="panel">
+      <h2>事件流（≤ 当前虚拟时间）</h2>
+      <p class="hint">高亮行恰好发生在当前虚拟时刻；同一时刻按事件 ID 升序。</p>
+      <div id="event-log"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+'use strict';
+/* 复盘数据在导出时由服务端内联（data.json 的同一份内容，已脱敏：
+   不含房间码、组加入码、观察 token）。页面零外链，file:// 直接打开即可运行。 */
+window.__REVIEW_DATA__ = "__REPLAY_DATA_JSON__";
+
+(function () {
+  const D = window.__REVIEW_DATA__;
+  const $ = (s) => document.querySelector(s);
+
+  /* ---------------------------------------------------------- 工具 */
+  function fmt(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const h = String(Math.floor(s / 3600)).padStart(2, '0');
+    const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+    const sec = String(s % 60).padStart(2, '0');
+    return `${h}:${m}:${sec}`;
+  }
+  function wallFmt(t) {
+    if (!t) return '';
+    const d = new Date(t * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+           `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g,
+      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+  const TYPE_LABEL = {
+    group_added: '组建组', group_renamed: '组改名', group_removed: '组删除',
+    card_added: '卡片编排', card_removed: '卡片删除', card_revealed: '卡片揭示',
+    receipt_updated: '回执', answer_updated: '答复', answer_lock_updated: '答复锁定',
+    gate_updated: '门槛', clock: '时钟', reset: '重置',
+  };
+  const TYPE_CLASS = {
+    card_revealed: 'reveal', receipt_updated: 'recv', answer_updated: 'recv',
+    clock: 'clock', reset: 'reset',
+  };
+  function eventSummary(ev) {
+    const p = ev.payload || {};
+    switch (ev.type) {
+      case 'card_added': return `#${p.seq} ${p.title}（T+${fmt((p.trigger_seconds || 0) * 1000)}）`;
+      case 'card_removed': return `卡片 #${p.id}`;
+      case 'card_revealed': return `#${p.seq} ${p.title}${p.timed_out ? '（超时揭示）' : ''}`;
+      case 'group_added': return `组建组：${p.name}`;
+      case 'group_renamed': return `组 #${p.id} → ${p.name}`;
+      case 'group_removed': return `组 #${p.id} 删除`;
+      case 'receipt_updated': return `卡片 #${p.card_id} · 组 #${p.group_id} · ${p.acked ? '已收到' : '撤销'}`;
+      case 'answer_updated': return `卡片 #${p.card_id} · 组 #${p.group_id} · v${p.revision}`;
+      case 'answer_lock_updated': return `卡片 #${p.card_id} · ${p.answers_locked ? '锁定' : '开放'}`;
+      case 'gate_updated': return `卡片 #${p.card_id} · ${p.gate ? p.gate.state : ''}`;
+      case 'clock': return `${({ started: '开始', paused: '暂停', resumed: '继续' })[p.action] || p.action} → T+${fmt(p.elapsed_ms || 0)}`;
+      case 'reset': return `重置，开启新一轮`;
+      default: return '';
+    }
+  }
+
+  /* ---------------------------------------------------------- 回放状态推导 */
+  const groups = new Map();   // 持久编排：组（跨重置保留）
+  const cards = new Map();    // 持久编排：卡片定义（跨重置保留）
+
+  function groupName(id) {
+    const g = groups.get(id);
+    return g ? g.name : `#${id}`;
+  }
+
+  /* 截至 (round, t) 的「持久编排」：纯事件重放——应用更早轮次的全部
+     增删改事件 + 当前轮 vtime <= t 的事件，按事件 ID 升序。
+     编排跨重置保留（reset 不产生组/卡片事件）；卡片仅在其删除事件
+     生效后消失，更早时刻仍可见；空演练（无任何编排事件）自然为空。
+     capId 非 null 时再按事件 ID 截断（锚点还原：同刻更晚事件不计入）。
+     事件 ID 全局单调，更早轮次的事件 ID 必然更小，统一过滤安全。 */
+  function applyEntities(round, t, capId) {
+    groups.clear(); cards.clear();
+    D.events
+      .filter((e) => (capId == null || e.id <= capId) &&
+        (e.round < round || (e.round === round && e.vtime_ms <= t)))
+      .sort((a, b) => a.id - b.id)
+      .forEach((e) => {
+        const p = e.payload || {};
+        if (e.type === 'group_added') groups.set(p.id, { id: p.id, name: p.name });
+        else if (e.type === 'group_renamed') {
+          const g = groups.get(p.id); if (g) g.name = p.name;
+        } else if (e.type === 'group_removed') groups.delete(p.id);
+        else if (e.type === 'card_added') cards.set(p.id, Object.assign({ removed: false }, p));
+        else if (e.type === 'card_removed') cards.delete(p.id);
+      });
+  }
+
+  /* 当前轮 [0, t] 的过程状态：揭示 / 回执 / 答复（含版本轨迹）/ 锁定 / 时钟。
+     capId 非 null（锚点还原）时，只消费 id <= capId 的事件——这精确还原
+     锚点绑定水位：即便另一事件与锚点同一虚拟毫秒，只要 ID 更晚也不计入。 */
+  function roundState(round, t, capId) {
+    const evs = D.events
+      .filter((e) => (capId == null || e.id <= capId) &&
+        e.round === round && e.vtime_ms <= t)
+      .sort((a, b) => a.id - b.id);
+    const revealed = new Map();   // cardId -> card_revealed 载荷
+    const receipts = new Map();   // cardId -> Map(gid -> bool)
+    const answers = new Map();    // cardId -> Map(gid -> 最新版本)
+    const versions = new Map();   // cardId -> Map(gid -> [版本...])
+    const locks = new Map();      // cardId -> bool
+    let clock = { action: null, status: 'idle', vtime_ms: 0 };
+    evs.forEach((e) => {
+      const p = e.payload || {};
+      switch (e.type) {
+        case 'card_revealed':
+          revealed.set(p.id, Object.assign({ at_ms: e.vtime_ms }, p));
+          locks.set(p.id, !!p.answers_locked);
+          break;
+        case 'receipt_updated': {
+          if (!revealed.has(p.card_id)) break;
+          const m = receipts.get(p.card_id) || new Map();
+          m.set(p.group_id, !!p.acked);
+          receipts.set(p.card_id, m);
+          break;
+        }
+        case 'answer_updated': {
+          const m = answers.get(p.card_id) || new Map();
+          m.set(p.group_id, { body: p.body, revision: p.revision, updated_at: p.updated_at, at_ms: e.vtime_ms });
+          answers.set(p.card_id, m);
+          const vm = versions.get(p.card_id) || new Map();
+          const list = vm.get(p.group_id) || [];
+          list.push({ body: p.body, revision: p.revision, at_ms: e.vtime_ms, event_id: e.id });
+          vm.set(p.group_id, list);
+          versions.set(p.card_id, vm);
+          break;
+        }
+        case 'answer_lock_updated':
+          locks.set(p.card_id, !!p.answers_locked);
+          break;
+        case 'clock':
+          clock = { action: p.action, status: p.status, vtime_ms: p.vtime_ms };
+          break;
+      }
+    });
+    return { revealed, receipts, answers, versions, locks, clock };
+  }
+
+  function expectedGroups(card) {
+    return card.group_id == null ? [...groups.keys()].sort((a, b) => a - b) : [card.group_id];
+  }
+
+  /* 门槛状态（与服务端同口径，由当前轮回执推导） */
+  function gateState(card, rs, t) {
+    const g = card.gate;
+    if (!g || !g.depends_on_card_id) return null;
+    const selfRevealed = rs.revealed.get(card.id);
+    if (selfRevealed) {
+      return { state: selfRevealed.timed_out ? 'timeout' : 'unlocked', g };
+    }
+    // 未揭示：以前置卡当前轮的回执判断 waiting / unlocked
+    const depCard = cards.get(g.depends_on_card_id);
+    if (!depCard) return { state: 'waiting', g, pending: [] };
+    const expected = expectedGroups(depCard);
+    const acked = rs.receipts.get(depCard.id);
+    const pending = expected.filter((gid) => !(acked && acked.get(gid)));
+    return { state: pending.length ? 'waiting' : 'unlocked', g, pending, dep: depCard };
+  }
+
+  /* ---------------------------------------------------------- 渲染 */
+  const slider = $('#time-slider');
+  const roundSelect = $('#round-select');
+  let curRound = 0, curT = 0, playTimer = null;
+  let capAnchor = null;   // 锚点还原模式：当前绑定的锚点对象（null = 完整水位视图）
+
+  function anchorsOf(round) {
+    return (D.anchors || []).filter((a) => a.round === round)
+      .sort((a, b) => a.vtime_ms - b.vtime_ms || a.id - b.id);
+  }
+
+  function rounds() { return D.rounds && D.rounds.length ? D.rounds : [{ round: 0, ended: false, end_ms: 0 }]; }
+
+  function renderMeta() {
+    $('#room-name').textContent = (D.room && D.room.name) || '未命名演练';
+    const r = rounds()[curRound] || rounds()[0];
+    const rows = [
+      ['导出水位', `事件 #${D.high_water_event_id}`],
+      ['生成时刻', wallFmt(D.generated_at)],
+      ['当前查看', `第 ${curRound + 1} 轮 · T+${fmt(curT)}`],
+      ['编排卡片', `${(D.orchestration.cards || []).length} 张`],
+      ['已揭示（水位）', `${(D.revealed_cards || []).length} 张`],
+      ['复盘锚点', `${(D.anchors || []).length} 个（本轮 ${anchorsOf(curRound).length}）`],
+      ['时钟动作', `${(D.clock_actions || []).length} 个`],
+    ];
+    $('#meta-grid').innerHTML = rows.map(([k, v]) =>
+      `<div><span>${k}</span><strong>${esc(v)}</strong></div>`).join('');
+  }
+
+  function renderRoundSelect() {
+    const rs = rounds();
+    roundSelect.innerHTML = '';
+    rs.forEach((r) => {
+      const opt = document.createElement('option');
+      opt.value = String(r.round);
+      opt.textContent = `第 ${r.round + 1} 轮${r.ended ? '（已重置结束）' : '（当前轮）'}` +
+        ` · 时长 T+${fmt(r.end_ms || 0)}`;
+      roundSelect.appendChild(opt);
+    });
+    roundSelect.value = String(Math.min(curRound, rs.length - 1));
+    curRound = parseInt(roundSelect.value, 10);
+  }
+
+  function renderSlider() {
+    const r = rounds()[curRound];
+    const max = Math.max(1, r.end_ms || 0);
+    slider.max = String(max);
+    curT = Math.min(curT, max);
+    slider.value = String(curT);
+    $('#tick-end').textContent = `T+${fmt(r.end_ms || 0)}`;
+  }
+
+  function renderState() {
+    // 锚点还原：所有状态推导只消费 id <= 锚点绑定水位 的事件
+    const capId = capAnchor ? capAnchor.event_id : null;
+    applyEntities(curRound, curT, capId);
+    const rs = roundState(curRound, curT, capId);
+    $('#clock').textContent = fmt(curT);
+    const st = rs.clock.action === null ? '待机（本轮尚未开始）'
+      : ({ started: '进行中', paused: '已暂停', resumed: '进行中' })[rs.clock.action] || rs.clock.status;
+    $('#clock-sub').textContent = st;
+    $('#state-at').textContent =
+      `第 ${curRound + 1} 轮 · T+${fmt(curT)} / T+${fmt(rounds()[curRound].end_ms || 0)}` +
+      (capAnchor ? ` · 锚点截断至事件 #${capAnchor.event_id}` : '');
+
+    // 锚点截断横幅：明确当前为「锚点时刻精确还原」而非完整水位视图
+    const banner = $('#cap-banner');
+    if (capAnchor) {
+      banner.classList.add('on');
+      $('#cap-text').textContent =
+        `⚓ 锚点「${capAnchor.title}」精确还原：第 ${curRound + 1} 轮 T+${fmt(curT)}，` +
+        `仅重放事件 #${capAnchor.event_id} 及之前（同一虚拟毫秒内更晚的事件不计入）。`;
+    } else {
+      banner.classList.remove('on');
+    }
+
+    const list = $('#card-list');
+    list.innerHTML = '';
+    const all = [...cards.values()]
+      .sort((a, b) => (a.trigger_seconds - b.trigger_seconds) || a.seq - b.seq);
+    const visible = all; // 复盘为主持人视角：展示全部编排，未揭示卡置灰
+    $('#cards-empty').classList.toggle('hidden', visible.length > 0);
+    $('#cards-empty').textContent = visible.length === 0
+      ? '（空演练）水位时刻没有任何参与组与卡片：本复盘包仍可正常打开与拖动。' : '';
+
+    for (const card of visible) {
+      const rev = rs.revealed.get(card.id);
+      const li = document.createElement('li');
+      li.className = 'card-item ' + (rev ? 'revealed' : 'pending');
+
+      const target = card.group_id == null
+        ? '<span class="badge badge-all">全员</span>'
+        : `<span class="badge badge-target">仅 ${esc(groupName(card.group_id))}</span>`;
+      const stateBadge = rev
+        ? `<span class="badge badge-revealed">已揭示 T+${fmt(rev.at_ms)}</span>`
+        : (card.trigger_seconds * 1000 <= curT
+            ? '<span class="badge badge-pending">到点未揭示（门槛等待中）</span>'
+            : '<span class="badge badge-pending">待触发</span>');
+      li.innerHTML = `
+        <div class="card-meta">
+          <span><span class="card-trigger">T+${fmt(card.trigger_seconds * 1000)}</span>
+            · #${card.seq} ${target}
+            ${rs.locks.get(card.id) ? '<span class="chip chip-lock">🔒 答复已锁定</span>' : ''}
+          </span>
+          <span>${stateBadge}</span>
+        </div>
+        <div class="card-title">${esc(card.title)}</div>
+        ${card.content ? `<div class="card-content">${esc(card.content)}</div>` : ''}`;
+
+      const gate = gateState(card, rs, curT);
+      if (gate) {
+        const d = document.createElement('div');
+        d.className = `sub gate-${gate.state}`;
+        if (gate.state === 'waiting') {
+          d.textContent = `⏳ 回执门槛：等待前置 #${gate.g.depends_on_seq} 集齐回执` +
+            (gate.pending && gate.pending.length
+              ? `（未回执：${gate.pending.map(groupName).map(esc).join('、')}）` : '');
+        } else if (gate.state === 'unlocked') {
+          d.textContent = `🔓 回执门槛已解锁（前置 #${gate.g.depends_on_seq}）`;
+        } else {
+          d.textContent = `⏰ 超时揭示（前置 #${gate.g.depends_on_seq} 回执未集齐）`;
+        }
+        li.appendChild(d);
+      }
+
+      if (rev) {
+        li.appendChild(receiptBlock(card, rs));
+        li.appendChild(answerBlock(card, rs));
+      }
+      list.appendChild(li);
+    }
+  }
+
+  function receiptBlock(card, rs) {
+    const box = document.createElement('div');
+    box.className = 'sub';
+    const expected = expectedGroups(card);
+    if (!expected.length) { box.innerHTML = '<span class="empty">无参与组</span>'; return box; }
+    const m = rs.receipts.get(card.id);
+    const acked = expected.filter((gid) => m && m.get(gid));
+    box.innerHTML = `<strong>回执 ${acked.length}/${expected.length}</strong>`;
+    expected.forEach((gid) => {
+      const ok = m && m.get(gid);
+      const chip = document.createElement('span');
+      chip.className = 'chip ' + (ok ? 'chip-ok' : 'chip-wait');
+      chip.textContent = (ok ? '✓ ' : '未回执 · ') + groupName(gid);
+      box.appendChild(chip);
+    });
+    return box;
+  }
+
+  function answerBlock(card, rs) {
+    const box = document.createElement('div');
+    box.className = 'sub';
+    box.style.flexDirection = 'column';
+    box.style.alignItems = 'stretch';
+    const expected = expectedGroups(card);
+    if (!expected.length) return box;
+    const m = rs.answers.get(card.id);
+    const submitted = expected.filter((gid) => m && m.get(gid));
+    const head = document.createElement('div');
+    head.innerHTML = `<strong>答复 ${submitted.length}/${expected.length}</strong>`;
+    expected.forEach((gid) => {
+      const a = m && m.get(gid);
+      const chip = document.createElement('span');
+      chip.className = 'chip ' + (a ? 'chip-ok' : 'chip-wait');
+      chip.style.marginLeft = '6px';
+      chip.textContent = (a ? `✓ v${a.revision} ` : '未提交 · ') + groupName(gid);
+      head.appendChild(chip);
+    });
+    box.appendChild(head);
+
+    const vm = rs.versions.get(card.id);
+    expected.forEach((gid) => {
+      const a = m && m.get(gid);
+      if (!a) return;
+      const det = document.createElement('details');
+      det.className = 'ans';
+      const list = (vm && vm.get(gid)) || [];
+      det.innerHTML = `<summary>${esc(groupName(gid))} · 当前 v${a.revision}` +
+        `（共 ${list.length} 个版本，点击展开版本轨迹）</summary>`;
+      list.slice().reverse().forEach((v) => {
+        const body = document.createElement('div');
+        body.innerHTML =
+          `<div class="ans-meta">v${v.revision} · T+${fmt(v.at_ms)} · 事件 #${v.event_id}</div>` +
+          `<div class="ans-body">${esc(v.body) || '（空）'}</div>`;
+        det.appendChild(body);
+      });
+      box.appendChild(det);
+    });
+    return box;
+  }
+
+  function renderClockActions() {
+    const host = $('#clock-actions');
+    const capId = capAnchor ? capAnchor.event_id : null;
+    let acts = D.clock_actions || [];
+    if (capId != null) acts = acts.filter((a) => a.event_id <= capId);
+    if (!acts.length) { host.innerHTML = '<p class="empty">本轮演练未操作过时钟。</p>'; return; }
+    const label = { started: '开始', paused: '暂停', resumed: '继续', reset: '重置' };
+    host.innerHTML = `<table><thead><tr><th>轮次</th><th>动作</th><th>虚拟时间</th><th>墙钟</th></tr></thead><tbody>` +
+      acts.map((a) => {
+        const at = curRound === a.round && a.vtime_ms <= curT;
+        return `<tr class="${at ? 'at-t' : ''}">
+          <td class="mono">第${a.round + 1}轮</td>
+          <td><span class="tag ${a.action === 'reset' ? 'reset' : 'clock'}">${label[a.action] || a.action}</span></td>
+          <td class="mono">T+${fmt(a.vtime_ms)}</td>
+          <td class="mono">${wallFmt(a.created_at)}</td></tr>`;
+      }).join('') + '</tbody></table>';
+  }
+
+  function renderEventLog() {
+    const host = $('#event-log');
+    const capId = capAnchor ? capAnchor.event_id : null;
+    const evs = D.events
+      .filter((e) => (capId == null || e.id <= capId) &&
+        e.round === curRound && e.vtime_ms <= curT)
+      .sort((a, b) => a.vtime_ms - b.vtime_ms || a.id - b.id); // 同一时刻按事件 ID 稳定排序
+    if (!evs.length) { host.innerHTML = '<p class="empty">截至该虚拟时间尚无事件。</p>'; return; }
+    host.innerHTML = `<table><thead><tr><th>虚拟时间</th><th>#</th><th>类型</th><th>内容</th></tr></thead><tbody>` +
+      evs.map((e) => {
+        // 锚点模式下高亮该轮最后一条被重放的事件（即锚点水位边界）
+        const exact = capId != null ? e.id === capId : e.vtime_ms === curT;
+        return `<tr class="${exact ? 'at-t' : ''}">
+          <td class="mono">T+${fmt(e.vtime_ms)}</td>
+          <td class="mono">${e.id}</td>
+          <td><span class="tag ${TYPE_CLASS[e.type] || ''}">${TYPE_LABEL[e.type] || e.type}</span></td>
+          <td>${esc(eventSummary(e))}</td></tr>`;
+      }).join('') + '</tbody></table>';
+  }
+
+  /* 复盘锚点：按轮次分组列出（只显示不晚于导出水位的锚点——data.anchors 已在服务端截断）。 */
+  function renderAnchors() {
+    const host = $('#anchor-groups');
+    const all = D.anchors || [];
+    if (!all.length) {
+      host.innerHTML = '<p class="empty">本复盘包不含锚点（导出时主持人尚未记录，或记录晚于导出水位）。</p>';
+      return;
+    }
+    host.innerHTML = '';
+    const byRound = new Map();
+    all.forEach((a) => {
+      if (!byRound.has(a.round)) byRound.set(a.round, []);
+      byRound.get(a.round).push(a);
+    });
+    [...byRound.keys()].sort((a, b) => a - b).forEach((rd) => {
+      const wrap = document.createElement('div');
+      const head = document.createElement('div');
+      head.className = 'anchor-round-head';
+      const meta = rounds()[rd];
+      head.textContent = `第 ${rd + 1} 轮${meta && meta.ended ? '（已重置结束）' : ''}` +
+        ` · ${byRound.get(rd).length} 个锚点`;
+      wrap.appendChild(head);
+      const ul = document.createElement('ul');
+      ul.className = 'anchor-list';
+      anchorsOf(rd).forEach((a) => {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'anchor-item' +
+          (capAnchor && capAnchor.id === a.id ? ' active' : '');
+        btn.innerHTML =
+          `<div class="anchor-item-head">` +
+            `<span class="anchor-item-title">⚓ ${esc(a.title)}</span>` +
+            `<span class="anchor-item-time">T+${fmt(a.vtime_ms)}</span>` +
+          `</div>` +
+          (a.note ? `<div class="anchor-item-note">${esc(a.note)}</div>` : '') +
+          `<div class="anchor-item-meta">绑定事件水位 #${a.event_id}` +
+          (a.updated_at && a.updated_at !== a.created_at ? ' · 备注已修改' : '') + `</div>`;
+        btn.onclick = () => jumpToAnchor(a);
+        li.appendChild(btn);
+        ul.appendChild(li);
+      });
+      wrap.appendChild(ul);
+      host.appendChild(wrap);
+    });
+  }
+
+  function renderAll() {
+    renderMeta();
+    renderSlider();
+    renderState();
+    renderAnchors();
+    renderClockActions();
+    renderEventLog();
+  }
+
+  /* ---------------------------------------------------------- 交互 */
+
+  /* 点击锚点：切到绑定轮次、滑块跳到绑定虚拟毫秒、状态仅重放至锚点绑定水位。
+     不修改滑块 max（轮次跨度仍按导出水位）；只要不手动拖走，状态始终
+     按 capId 截断，精确还原同一虚拟时刻内的状态。 */
+  function jumpToAnchor(a) {
+    stopPlay();
+    curRound = Math.max(0, Math.min(a.round, rounds().length - 1));
+    roundSelect.value = String(curRound);
+    renderSlider();
+    capAnchor = a;
+    curT = a.vtime_ms;
+    slider.value = String(curT);
+    renderAll();
+  }
+
+  function clearCap() {
+    if (!capAnchor) return;
+    capAnchor = null;
+    renderAll();
+  }
+  $('#btn-clear-cap').onclick = clearCap;
+
+  roundSelect.onchange = () => {
+    curRound = parseInt(roundSelect.value, 10);
+    curT = rounds()[curRound].end_ms || 0; // 切轮默认定位到该轮水位时刻
+    capAnchor = null;                      // 切轮退出锚点截断
+    stopPlay();
+    renderAll();
+  };
+  slider.oninput = () => { stopPlay(); capAnchor = null; curT = parseInt(slider.value, 10); renderAll(); };
+
+  function stopPlay() {
+    if (playTimer) { clearInterval(playTimer); playTimer = null; $('#btn-play').textContent = '▶ 播放'; }
+  }
+  $('#btn-play').onclick = () => {
+    if (playTimer) { stopPlay(); return; }
+    capAnchor = null;  // 播放按完整水位走一遍，退出锚点截断
+    renderAnchors();
+    const max = rounds()[curRound].end_ms || 0;
+    if (curT >= max) curT = 0;
+    $('#btn-play').textContent = '⏸ 暂停';
+    let last = performance.now();
+    playTimer = setInterval(() => {
+      const now = performance.now();
+      curT += (now - last) * parseFloat($('#speed').value);
+      last = now;
+      if (curT >= max) { curT = max; stopPlay(); }
+      slider.value = String(curT);
+      renderAll();
+    }, 50);
+  };
+
+  /* ---------------------------------------------------------- 初始化 */
+  curRound = rounds().length - 1;           // 默认打开最后一轮（水位所在轮）
+  renderRoundSelect();
+  curRound = parseInt(roundSelect.value, 10);
+  curT = rounds()[curRound].end_ms || 0;    // 默认定位到导出水位时刻
+  renderAll();
+})();
+</script>
+</body>
+</html>
