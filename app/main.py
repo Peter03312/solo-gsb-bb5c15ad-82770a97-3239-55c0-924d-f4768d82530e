@@ -12,7 +12,9 @@
 - 限时观察席分享：主持人选择 1~3 个参与组并设置 5~120 分钟有效期，
   生成可撤销的随机观察链接；观察者只读，仅能收到已揭示的全员卡片与
   所选组卡片，拿不到未揭示卡、房间码、组加入码、回执明细与控制能力；
-  到期或撤销时立即断开在线观察者，凭证此后一律失效
+  已揭示卡被删除时观察者随 card_removed（载荷按删除前状态判定，仅曾
+  揭示且属授权组才投递）实时移除该卡，未揭示卡的删除与 answer_lock_updated
+  等编排事件一律不下发；到期或撤销时立即断开在线观察者，凭证此后一律失效
 - 复盘锚点：主持人在任意状态记录标题/备注，服务端在同一把状态锁内把锚点
   绑定到当前轮次、虚拟毫秒与当时事件水位（暂停期间冻结）；支持改备注/删除，
   实时同步给主持人，参与者与观察者不可见；重置后锚点保留并归属原轮次；
@@ -146,6 +148,19 @@ def card_public(card: sqlite3.Row) -> dict:
         "revealed_at_ms": card["revealed_at_ms"],
         "answers_locked": bool(card["answers_locked"]),  # 答复锁定状态（不含任何答复内容）
     }
+
+
+def observer_card_public(card: sqlite3.Row) -> dict:
+    """观察者视野的卡片序列化：在公共字段上剔除答复锁定状态。
+
+    answers_locked 是主持人编排状态（未揭示卡也可预先锁定），观察者既收不到
+    answer_lock_updated 事件，快照中也不应携带该状态——否则锁定/开放会在
+    刷新或重连时经快照暴露。其余字段与 card_public 一致（快照本身只查已揭示、
+    授权组卡片，且不带任何回执/答复视图）。
+    """
+    data = card_public(card)
+    data.pop("answers_locked", None)
+    return data
 
 
 def answer_public(answer: sqlite3.Row) -> dict:
@@ -523,12 +538,12 @@ def share_public(share: sqlite3.Row) -> dict:
 
 def build_snapshot(room: sqlite3.Row, scope: int | None | ObserverScope) -> dict:
     """权威全量状态，按视野过滤：主持人拿全部；参与者只拿全员卡片与本组卡片；
-    观察者只拿已揭示的全员卡片与所选组卡片（只读，无回执数据）。
+    观察者只拿已揭示的全员卡片与所选组卡片（只读，无回执数据、无答复锁状态）。
 
     回执数据同样按视野下发：主持人拿到每张卡的 expected/acked 汇总，
     参与者只拿到本组是否已回执（my_receipt），观察者完全拿不到回执。
     处置答复同理：主持人拿到每张卡的 expected/submitted（含各组正文与版本），
-    参与者只拿到本组答复（my_answer），观察者完全拿不到答复。
+    参与者只拿到本组答复（my_answer），观察者完全拿不到答复与 answers_locked。
     """
     if isinstance(scope, ObserverScope):
         gids = sorted(scope.group_ids)
@@ -554,7 +569,10 @@ def build_snapshot(room: sqlite3.Row, scope: int | None | ObserverScope) -> dict
             "scope": {"role": "observer", "group_ids": gids},
             "room": room_public(room, include_code=False),       # 观察者拿不到房间码
             "groups": [{"id": g["id"], "name": g["name"]} for g in groups],  # 不含组加入码
-            "cards": [card_public(c) for c in cards],            # 仅已揭示；无回执字段
+            # 仅已揭示、无回执字段；answers_locked 属主持人编排状态（未揭示卡
+            # 也可预先锁定），同样剔除——观察者经快照也看不到答复锁，与
+            # answer_lock_updated 事件一律不下发保持同一视野
+            "cards": [observer_card_public(c) for c in cards],
         }
     if scope is None:
         cards = db.execute(
@@ -708,7 +726,7 @@ def poll_event_group_ids(payload: dict) -> set[int]:
 
 def event_visible(scope: int | None | ObserverScope, type_: str, payload: dict) -> bool:
     """事件是否应投递给该视野。主持人全收；参与者只收全员/本组卡片事件与房间级事件；
-    观察者只收已揭示卡片揭示/移除与房间级事件。"""
+    观察者只收删除前已揭示卡片的揭示/移除与房间级事件。"""
     if scope is None:
         return True
     if type_.startswith("share_") or type_ == "gate_updated" or type_.startswith("anchor_") \
@@ -718,9 +736,19 @@ def event_visible(scope: int | None | ObserverScope, type_: str, payload: dict) 
         # 通用广播只给主持人，避免把逐组选票全量载荷发给参与者。
         return False
     if isinstance(scope, ObserverScope):
-        if type_ in ("card_revealed", "card_removed", "answer_lock_updated"):
+        # 答复锁是主持人编排状态（未揭示卡也可预先锁定），观察者一律不可见：
+        # 既不下发 answer_lock_updated，观察者快照也不含任何答复/锁定视图。
+        if type_ == "answer_lock_updated":
+            return False
+        if type_ == "card_revealed":
             gid = payload.get("group_id")
             return gid is None or gid in scope.group_ids
+        if type_ == "card_removed":
+            # 必须同时满足「删除前已揭示」与「属于授权组」：
+            # 未揭示卡从不在观察视野内，其删除不得暴露卡片标识；
+            # revealed 由删除路径在删行前从卡片行写入载荷（删行后无从判定）。
+            gid = payload.get("group_id")
+            return bool(payload.get("revealed")) and (gid is None or gid in scope.group_ids)
         if type_ in ("group_renamed", "group_removed"):
             return payload.get("id") in scope.group_ids
         if type_ in ("card_added", "group_added", "receipt_updated", "answer_updated",
@@ -751,6 +779,18 @@ def event_visible(scope: int | None | ObserverScope, type_: str, payload: dict) 
     if type_ in ("group_added", "group_removed"):
         return False
     return True  # clock / reset 等房间级事件
+
+
+def observer_payload(type_: str, payload: dict) -> dict:
+    """投递到观察者连接前的载荷脱敏（event_visible 已判定可见后调用）。
+
+    目前只有 card_revealed 需要处理：其载荷复用 card_public，含主持人编排
+    字段 answers_locked（未揭示卡也可被预先锁定），须像观察者快照一样剔除，
+    避免揭示瞬间暴露答复锁编排；其余事件载荷本就不含观察者不可见字段，原样返回。
+    """
+    if type_ == "card_revealed":
+        return {k: v for k, v in payload.items() if k != "answers_locked"}
+    return payload
 
 
 class Hub:
@@ -787,6 +827,13 @@ class Hub:
                     await ws.send_json({**out_base, "payload": player_payloads[scope]})
                 elif isinstance(scope, int) and player_payload is not None:
                     await ws.send_json({**out_base, "payload": player_payload})
+                elif isinstance(scope, ObserverScope):
+                    # 观察者：在视野过滤之外再对载荷脱敏——card_revealed 载荷
+                    # 复用 card_public（含 answers_locked），主持人可对未揭示卡
+                    # 预先锁定，揭示瞬间若原样下发会经该编排字段暴露锁状态；
+                    # 观察者快照卡片同样无此字段，剔除后实时与刷新视野一致。
+                    await ws.send_json(
+                        {**out_base, "payload": observer_payload(type_, payload)})
                 else:
                     await ws.send_json(out_base)
             except Exception:
@@ -1172,11 +1219,18 @@ async def delete_card(code: str, card_id: int):
         if deps:
             raise HTTPException(status_code=409,
                                 detail=f"card is a gate dependency of {deps} card(s)")
+        # 删除前先固定卡片当时的揭示状态与目标组：行删除后观察者是否曾见过
+        # 该卡便无从判定（快照只保留已揭示卡），故把二者一并写入事件载荷，
+        # event_visible 据此对观察者过滤——未揭示卡的删除不会向观察者暴露。
+        revealed_before = bool(card["revealed"])
+        group_id_before = card["group_id"]
         db.execute("DELETE FROM cards WHERE id = ?", (card_id,))
         db.commit()
-        # 带上 group_id，广播过滤才能判断该事件是否属于某参与组的视野
+        # 带上 group_id 与删除前 revealed，广播过滤才能判断该事件是否属于
+        # 某参与组/观察者的视野（host/参与组行为不依赖 revealed）
         await publish(room["code"], room["id"], "card_removed",
-                      {"id": card_id, "group_id": card["group_id"]})
+                      {"id": card_id, "group_id": group_id_before,
+                       "revealed": revealed_before})
         return {"ok": True}
 
 

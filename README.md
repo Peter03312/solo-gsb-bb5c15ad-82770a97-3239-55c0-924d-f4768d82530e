@@ -249,7 +249,10 @@ DATABASE_PATH=./data/inject.db uvicorn app.main:app --reload --port 8000
 - 参与组被删除后其加入码立即失效，仍在连接的该组参与者会被服务端主动断开。
 - 观察凭证是第三种连接凭证（随机 128 位，与房间码/加入码不同命名空间）：观察者
   连接 `/ws/observe/{token}`，快照与增量按「已揭示 ∩（全员 ∪ 所选组）」过滤，
-  不下发未揭示卡、房间码、组加入码与回执明细；`share_*` 管理事件仅主持人可见。
+  不下发未揭示卡、房间码、组加入码与回执明细；`card_removed` 额外要求卡片在
+  **删除前已揭示**（载荷 `revealed` 取删行前状态，已揭示授权卡删除后实时同步
+  移除，刷新/重连视野一致），`answer_lock_updated` 一律不下发；
+  `share_*` 管理事件仅主持人可见。
   撤销或到期时服务端按凭证断开全部在线观察者（关闭码 4403），凭证此后 REST 返回
   `410`、WS 拒绝接入，刷新重连不可恢复；到期扫描由后台 tick 完成并落库标记，
   服务重启后不会重复广播，凭证状态也不会丢。
@@ -380,12 +383,14 @@ curl -s $BASE/api/join/$JOIN_RED         # 红队：全员卡 + 红队卡
 - 答复变化以 `answer_updated` 事件广播：`{card_id, group_id, body, revision, updated_at}`；
   **含正文，按视野过滤**——主持人全收，参与者只收本组的答复事件（同组多个在线成员自动同步），
   观察者收不到。锁定变化以 `answer_lock_updated` 事件广播：`{card_id, group_id, answers_locked}`，
-  按卡片视野下发（主持人全收，参与者只收本组可见卡片）。
+  按卡片视野下发（主持人全收，参与者只收本组可见卡片）；**观察者一律收不到锁定/开放事件**，
+  其快照卡片也不携带 `answers_locked` 字段（属主持人编排状态，未揭示卡也可预先锁定）。
 - 快照中的答复视图按视野区分：主持人每张卡片带
   `answers: {expected: [...], submitted: [{group_id, body, revision, updated_at}, ...]}`
   （expected 口径与回执一致：全员卡 = 所有参与组 / 定向卡 = 目标组）；
-  参与者只带 `my_answer: {body, revision} | null`，看不到他组正文；观察者不带任何答复字段。
-  卡片公共字段 `answers_locked` 对所有角色可见（仅锁定状态，不含答复内容）。
+  参与者只带 `my_answer: {body, revision} | null`，看不到他组正文；观察者不带任何答复字段，
+  其卡片对象也不带 `answers_locked`。卡片公共字段 `answers_locked` 对主持人与参与者可见
+  （仅锁定状态，不含答复内容）。
 - 答复存于 `answers` 表，`UNIQUE(card_id, group_id)` 保证同组仅一份，`revision` 每次修改 +1；
   删除卡片/参与组时级联清理，「重置」清空全房间答复并复位全部 `answers_locked`。
 - 旧库启动时自动迁移：`cards` 表补 `answers_locked` 列（既有卡片一律未锁定），并新建 `answers` 表。
@@ -403,11 +408,87 @@ curl -s $BASE/api/join/$JOIN_RED         # 红队：全员卡 + 红队卡
 - 分享变化以 `share_created` / `share_revoked` / `share_expired` 事件广播，**仅主持人可见**
   （载荷含观察凭证，参与者与观察者都收不到）。
 - 观察者快照中：`room` 不含房间码、`groups` 不含组加入码（仅所选组的 id 与名称）、
-  `cards` 只含已揭示卡片且不带任何回执字段。
+  `cards` 只含已揭示卡片且不带任何回执/答复字段，也不带 `answers_locked` 编排状态。
+- **增量事件的观察席过滤**：`card_revealed` 仅全员卡与所选组卡投递；`card_removed`
+  **只在卡片删除前已揭示、且属于授权组（全员或所选组）时投递**——载荷为
+  `{id, group_id, revealed}`，其中 `revealed` 由删除路径在删行前从卡片行固定
+  （删除后卡片行不存在，快照只剩已揭示卡，判定依据必须取删除前状态）。删除尚未
+  揭示的全员卡/授权组卡不会向观察者暴露卡片标识；已揭示卡片删除后，观察页随该
+  事件同步移除，刷新/重连所得快照与之严格一致。`answer_lock_updated`（锁定/开放）
+  对观察者**一律不下发**；`card_added`、回执、答复、投票、车辆与情报事件同样不下发。
 - 分享存于 `observer_shares` 表（凭证、所选组、到期时刻、撤销与到期标记），
   随 SQLite 持久化，服务重启后有效分享继续可用、失效分享继续失效。
 
-## 现场决策投票 API 与事件
+### 本轮修复的端到端调用示例（curl）
+
+下例演示观察席增量视野：主持人暂停后删除**已揭示**与**未揭示**卡片、锁定/开放答复，
+观察者只会收到已揭示授权卡的 `card_removed`（页面同步移除），收不到未揭示卡删除
+与 `answer_lock_updated`；刷新 `/api/observe/{token}` 与重连 WebSocket 所得视野一致。
+启动方式不变（`docker compose up --build` 或本地 `uvicorn app.main:app`）。
+
+```bash
+BASE=http://localhost:8000
+j() { python3 -c 'import sys,json; print(json.load(sys.stdin)'"$1"')'; }
+
+# 1) 建房、建两个参与组
+ROOM=$(curl -s -X POST $BASE/api/rooms -H 'Content-Type: application/json' -d '{"name":"观察视野演练"}')
+CODE=$(echo "$ROOM" | j '["code"]')
+G1=$(curl -s -X POST $BASE/api/rooms/$CODE/groups -H 'Content-Type: application/json' -d '{"name":"红队"}')
+GID=$(echo "$G1" | j '["id"]')
+curl -s -X POST $BASE/api/rooms/$CODE/groups -H 'Content-Type: application/json' -d '{"name":"蓝队"}' >/dev/null
+
+# 2) 编排两张全员卡（T+10s / T+200s）与一张红队卡（T+10s）
+C_ALL=$(curl -s -X POST $BASE/api/rooms/$CODE/cards -H 'Content-Type: application/json' \
+  -d '{"title":"全员告警","trigger_seconds":10}')
+C_ALL_ID=$(echo "$C_ALL" | j '["id"]')
+C_HID=$(curl -s -X POST $BASE/api/rooms/$CODE/cards -H 'Content-Type: application/json' \
+  -d '{"title":"未揭示全员卡","trigger_seconds":200}')
+C_HID_ID=$(echo "$C_HID" | j '["id"]')
+C_RED=$(curl -s -X POST $BASE/api/rooms/$CODE/cards -H 'Content-Type: application/json' \
+  -d "{\"title\":\"红队处置\",\"trigger_seconds\":10,\"group_id\":$GID}")
+C_RED_ID=$(echo "$C_RED" | j '["id"]')
+
+# 3) 开始 → 等 T+10s 两张卡到期自动揭示（tick 间隔 TICK_INTERVAL，默认 0.25s）→ 暂停
+curl -s -X POST $BASE/api/rooms/$CODE/start >/dev/null
+sleep 1
+curl -s -X POST $BASE/api/rooms/$CODE/pause >/dev/null
+
+# 4) 生成观察分享（授权红队；有效期 30 分钟），观察者快照此时只含 2 张已揭示授权卡
+SHARE=$(curl -s -X POST $BASE/api/rooms/$CODE/shares -H 'Content-Type: application/json' \
+  -d "{\"group_ids\":[$GID],\"minutes\":30}")
+TOKEN=$(echo "$SHARE" | j '["token"]')
+curl -s $BASE/api/observe/$TOKEN | j '["cards"]'   # 两张卡，且无 answers_locked / receipts
+
+# 5) 主持人锁定再开放红队卡答复：观察者既收不到 lock 也收不到 unlock
+#    （answer_lock_updated 一律不可见）；红队参与者通道两者都收得到
+curl -s -X POST $BASE/api/rooms/$CODE/cards/$C_RED_ID/answers/lock
+curl -s -X POST $BASE/api/rooms/$CODE/cards/$C_RED_ID/answers/unlock
+
+# 6) 暂停后删卡：
+#    - 已揭示全员卡/红队卡 → 观察者实时收到 card_removed 并从页面移除
+#    - 未揭示全员卡        → 观察者收不到任何 card_removed（卡片标识不泄露）
+curl -s -X DELETE $BASE/api/rooms/$CODE/cards/$C_ALL_ID
+curl -s -X DELETE $BASE/api/rooms/$CODE/cards/$C_RED_ID
+curl -s -X DELETE $BASE/api/rooms/$CODE/cards/$C_HID_ID
+
+# 7) 刷新（REST）视野为空——与实时结果一致
+curl -s $BASE/api/observe/$TOKEN | j '["cards"]'   # []
+```
+
+实时通道用任意 WebSocket 客户端即可观察上述事件差异（先收 `snapshot`，再收增量）：
+
+```bash
+# 观察者（只收已揭示授权卡的 card_revealed/card_removed；收不到 answer_lock_updated）
+wscat -c "ws://localhost:8000/ws/observe/$TOKEN?last_event_id=0"
+# 主持人（全量：未揭示卡删除、锁定/开放等编排事件全收）
+wscat -c "ws://localhost:8000/ws/$CODE?last_event_id=0"
+```
+
+`card_removed` 事件形如 `{"type":"card_removed","payload":{"id":7,"group_id":null,
+"revealed":true}, ...}`：`revealed` 为**删除前**的揭示状态，观察者只对
+`revealed=true` 且 `group_id` 为 `null`（全员）或属于授权组的该事件做页面移除。
+
+
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
